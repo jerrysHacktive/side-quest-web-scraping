@@ -4,7 +4,6 @@ require("dotenv").config();
 const logger = require("./utils/logger");
 const scrapeRoute = require("./route/scrape-route");
 
-
 app.use(express.json());
 
 const API_PORT = process.env.API_PORT || 4000;
