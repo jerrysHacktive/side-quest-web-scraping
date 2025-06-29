@@ -6,8 +6,8 @@
     "dev": "node script.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [ "express puppeteer csv-writer dotenv winston "   ],
-  "author": "",
+  "keywords": [ "express puppeteer csv-writer dotenv winston " ],
+  "author": "Bowoto Jeremiah",
   "license": "ISC",
   "description": "This repository contains a web scraping script designed to collect data from the public UNESCO list of heritage sites .The script will extract relevant information from each site and format it into a specific structure",
   "dependencies": {
