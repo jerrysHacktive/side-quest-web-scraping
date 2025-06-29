@@ -5,7 +5,6 @@ const createCsvWriter = require("csv-writer").createObjectCsvWriter;
 const logger = require("../utils/logger");
 const { log } = require("winston");
 
-
 // function to ensure output folder exists
 const outputDir = path.join(__dirname, '../output');
 if(!fs.existsSync(outputDir)) {
