@@ -26,7 +26,7 @@ const csvWriter = createCsvWriter({
   ],
 });
 
-// Summarize text using Gemini API (text-bison-001 model)
+// Summarize text using Gemini API 
 const summarizeText = async (longText) => {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/text-bison-001:generateText?key=${process.env.GEMINI_API_KEY}`;
 
