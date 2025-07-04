@@ -2,18 +2,22 @@ const puppeteer = require("puppeteer");
 const winston = require("winston");
 const createCsvWriter = require("csv-writer").createObjectCsvWriter;
 const axios = require("axios");
+const path = require("path");
 require("dotenv").config();
 
 // Logger setup
 const logger = winston.createLogger({
-  level: "info",
+  level: "debug",
   format: winston.format.simple(),
   transports: [new winston.transports.Console()],
 });
 
+// path for CSV file
+const csvFilePath = path.join(__dirname, "unesco_sites.csv");
+
 // CSV writer config
 const csvWriter = createCsvWriter({
-  path: "unesco_sites.csv",
+  path: csvFilePath,
   header: [
     { id: "title", title: "Title" },
     { id: "aura", title: "Aura" },
@@ -26,38 +30,75 @@ const csvWriter = createCsvWriter({
   ],
 });
 
-// Summarize text using Gemini API (text-bison-001 model)
+// Gemini API summary using gemini-pro
 const summarizeText = async (longText) => {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/text-bison-001:generateText?key=${process.env.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+  if (!longText || longText.trim().length < 20) {
+    logger.warn(
+      "Description too short or empty. Skipping Gemini summarization."
+    );
+    return longText || "No description available.";
+  }
+
+  const prompt = `Summarize this UNESCO description in exactly 2 simple sentences:\n\n${longText}`;
+
+  const requestPayload = {
+    contents: [
+      {
+        parts: [
+          {
+            text: prompt,
+          },
+        ],
+      },
+    ],
+  };
+
+  logger.debug("Sending request to Gemini API...");
+  logger.debug(`Gemini API URL: ${url}`);
+  logger.debug(`Request payload:\n${JSON.stringify(requestPayload, null, 2)}`);
 
   try {
-    const response = await axios.post(
-      url,
-      {
-        prompt: {
-          text: `Summarize this UNESCO description in exactly 2 simple sentences:\n\n${longText}`,
-        },
-        temperature: 0.3,
-        maxOutputTokens: 100,
+    const response = await axios.post(url, requestPayload, {
+      headers: {
+        "Content-Type": "application/json",
       },
-      {
-        headers: { "Content-Type": "application/json" },
-      }
+    });
+
+    logger.debug(
+      `Gemini API raw response:\n${JSON.stringify(response.data, null, 2)}`
     );
 
-    const summary = response.data?.candidates?.[0]?.output;
-    return summary?.trim() || longText.split(".").slice(0, 2).join(". ") + ".";
+    const output = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!output) {
+      logger.warn("Gemini returned no summary. Using fallback.");
+      return longText.split(".").slice(0, 2).join(". ") + ".";
+    }
+
+    return output.trim();
   } catch (error) {
-    logger.error(
-      `Gemini API Error: ${error.response?.status} ${
-        error.response?.data?.error?.message || error.message
-      }`
-    );
+    const status = error.response?.status;
+    const message = error.response?.data?.error?.message || error.message;
+
+    logger.error(`Gemini API Error ${status}: ${message}`);
+    if (error.response?.data) {
+      logger.debug(
+        `Gemini API full error response:\n${JSON.stringify(
+          error.response.data,
+          null,
+          2
+        )}`
+      );
+    }
+
+    // Fallback summary
     return longText.split(".").slice(0, 2).join(". ") + ".";
   }
 };
 
-// Helper: retry navigation
+// Retry navigation function
 async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
   let attempts = 0;
   while (attempts < maxRetries) {
@@ -108,6 +149,10 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
     );
 
     logger.info(`Found ${siteLinks.length} site links.`);
+
+    if (!siteLinks.length) {
+      throw new Error("No site links found, aborting.");
+    }
 
     const data = [];
     const sitePage = await browser.newPage();
@@ -163,8 +208,22 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
 
     await sitePage.close();
 
-    await csvWriter.writeRecords(data);
-    logger.info("Scraping complete. Data saved to unesco_sites.csv");
+    logger.info(`🧮 Records collected: ${data.length}`);
+    if (data.length === 0) {
+      logger.warn("No data collected, CSV file will not be created.");
+    } else {
+      for (let i = 0; i < Math.min(data.length, 3); i++) {
+        logger.info(
+          `Record ${i + 1} sample: ${JSON.stringify(data[i], null, 2)}`
+        );
+      }
+      try {
+        await csvWriter.writeRecords(data);
+        logger.info(`Scraping complete. Data saved to ${csvFilePath}`);
+      } catch (csvError) {
+        logger.error("Failed to write CSV file:", csvError);
+      }
+    }
   } catch (error) {
     logger.error(`Scraping error: ${error.stack}`);
   } finally {
