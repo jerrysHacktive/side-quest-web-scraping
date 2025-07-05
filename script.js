@@ -12,10 +12,8 @@ const logger = winston.createLogger({
   transports: [new winston.transports.Console()],
 });
 
-// path for CSV file
 const csvFilePath = path.join(__dirname, "unesco_sites.csv");
 
-// CSV writer config
 const csvWriter = createCsvWriter({
   path: csvFilePath,
   header: [
@@ -30,98 +28,48 @@ const csvWriter = createCsvWriter({
   ],
 });
 
-// Gemini API summary using gemini-pro
 const summarizeText = async (longText) => {
   const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   if (!longText || longText.trim().length < 20) {
-    logger.warn(
-      "Description too short or empty. Skipping Gemini summarization."
-    );
+    logger.warn("Description too short or empty. Skipping Gemini summarization.");
     return longText || "No description available.";
   }
 
   const prompt = `Summarize this UNESCO description in exactly 2 simple sentences:\n\n${longText}`;
 
-  const requestPayload = {
-    contents: [
-      {
-        parts: [
-          {
-            text: prompt,
-          },
-        ],
-      },
-    ],
-  };
-
-  logger.debug("Sending request to Gemini API...");
-  logger.debug(`Gemini API URL: ${url}`);
-  logger.debug(`Request payload:\n${JSON.stringify(requestPayload, null, 2)}`);
-
   try {
-    const response = await axios.post(url, requestPayload, {
-      headers: {
-        "Content-Type": "application/json",
-      },
+    const response = await axios.post(url, {
+      contents: [{ parts: [{ text: prompt }] }],
+    }, {
+      headers: { "Content-Type": "application/json" },
     });
 
-    logger.debug(
-      `Gemini API raw response:\n${JSON.stringify(response.data, null, 2)}`
-    );
-
     const output = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!output) {
-      logger.warn("Gemini returned no summary. Using fallback.");
-      return longText.split(".").slice(0, 2).join(". ") + ".";
-    }
-
-    return output.trim();
+    return output?.trim() || longText.split(".").slice(0, 2).join(". ") + ".";
   } catch (error) {
-    const status = error.response?.status;
-    const message = error.response?.data?.error?.message || error.message;
-
-    logger.error(`Gemini API Error ${status}: ${message}`);
-    if (error.response?.data) {
-      logger.debug(
-        `Gemini API full error response:\n${JSON.stringify(
-          error.response.data,
-          null,
-          2
-        )}`
-      );
-    }
-
-    // Fallback summary
+    logger.error(`Gemini API Error: ${error.message}`);
     return longText.split(".").slice(0, 2).join(". ") + ".";
   }
 };
 
-// Retry navigation function
-async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
-  let attempts = 0;
-  while (attempts < maxRetries) {
+const gotoWithRetries = async (page, url, options = {}, maxRetries = 3) => {
+  for (let attempts = 0; attempts < maxRetries; attempts++) {
     try {
       await page.goto(url, options);
       return;
     } catch (error) {
-      attempts++;
-      logger.warn(`Navigation failed (attempt ${attempts}): ${error.message}`);
-      if (attempts === maxRetries) throw error;
+      logger.warn(`Navigation failed (attempt ${attempts + 1}): ${error.message}`);
+      if (attempts + 1 === maxRetries) throw error;
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
-}
+};
 
-// Main scraping function
 (async () => {
   logger.info("Starting UNESCO scraper...");
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox"],
-  });
+  const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
   const page = await browser.newPage();
 
   try {
@@ -130,7 +78,6 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
       waitUntil: "networkidle2",
       timeout: 90000,
     });
-    logger.info("Successfully loaded the UNESCO list page.");
   } catch (error) {
     logger.error(`Failed to load the UNESCO list page: ${error.stack}`);
     await browser.close();
@@ -140,19 +87,13 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
   try {
     const siteLinks = await page.evaluate(() =>
       Array.from(document.querySelectorAll(".list_site a"))
-        .map((a) =>
-          a.href.startsWith("http")
-            ? a.href
-            : `https://whc.unesco.org${a.getAttribute("href")}`
-        )
+        .map((a) => a.href.startsWith("http") ? a.href : `https://whc.unesco.org${a.getAttribute("href")}`)
         .filter((href) => !href.includes("#"))
     );
 
     logger.info(`Found ${siteLinks.length} site links.`);
 
-    if (!siteLinks.length) {
-      throw new Error("No site links found, aborting.");
-    }
+    if (!siteLinks.length) throw new Error("No site links found, aborting.");
 
     const data = [];
     const sitePage = await browser.newPage();
@@ -167,27 +108,33 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
         });
 
         const siteData = await sitePage.evaluate(() => {
-          const getText = (selector) =>
-            document.querySelector(selector)?.innerText.trim() || " ";
-          const getImage = (selector) =>
-            document.querySelector(selector)?.src || " ";
+          const getText = (selector) => document.querySelector(selector)?.innerText.trim() || "";
+          const getImage = (selector) => document.querySelector(selector)?.getAttribute("src") || "";
 
-          const title = getText("h2");
-          const descriptionFull = getText("div#content p");
+          const title = getText("h2.title") || getText("#content h2");
+          const descElement = document.querySelector("div#content-desktop p") || document.querySelector("#content p");
+          const descriptionFull = descElement?.innerText.trim() || "";
           const coordsText = getText(".latlong");
           const image = getImage(".illustration img");
 
           return { title, descriptionFull, coordsText, image };
         });
 
-        let latitude = " ";
-        let longitude = " ";
-        const coordsMatch = siteData.coordsText.match(
-          /lat: ([\d.-]+), long: ([\d.-]+)/
-        );
+        if (!siteData.title || !siteData.descriptionFull) {
+          logger.warn("Missing title or description. Skipping site.");
+          continue;
+        }
+
+        let latitude = "";
+        let longitude = "";
+        const coordsMatch = siteData.coordsText.match(/Lat: ([\d.-]+), Long: ([\d.-]+)/i);
         if (coordsMatch) {
           [latitude, longitude] = [coordsMatch[1], coordsMatch[2]];
         }
+
+        const fullImageUrl = siteData.image.startsWith("http")
+          ? siteData.image
+          : siteData.image ? `https://whc.unesco.org${siteData.image}` : "";
 
         const summary = await summarizeText(siteData.descriptionFull);
 
@@ -199,7 +146,7 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
           latitude,
           longitude,
           price: "N/A",
-          images: siteData.image,
+          images: fullImageUrl,
         });
       } catch (err) {
         logger.warn(`Failed to scrape ${url}: ${err.message}`);
@@ -208,21 +155,12 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
 
     await sitePage.close();
 
-    logger.info(`🧮 Records collected: ${data.length}`);
-    if (data.length === 0) {
-      logger.warn("No data collected, CSV file will not be created.");
+    logger.info(` Records collected: ${data.length}`);
+    if (data.length) {
+      await csvWriter.writeRecords(data);
+      logger.info(`Scraping complete. Data saved to ${csvFilePath}`);
     } else {
-      for (let i = 0; i < Math.min(data.length, 3); i++) {
-        logger.info(
-          `Record ${i + 1} sample: ${JSON.stringify(data[i], null, 2)}`
-        );
-      }
-      try {
-        await csvWriter.writeRecords(data);
-        logger.info(`Scraping complete. Data saved to ${csvFilePath}`);
-      } catch (csvError) {
-        logger.error("Failed to write CSV file:", csvError);
-      }
+      logger.warn("No data collected. Skipping CSV creation.");
     }
   } catch (error) {
     logger.error(`Scraping error: ${error.stack}`);
@@ -230,3 +168,4 @@ async function gotoWithRetries(page, url, options = {}, maxRetries = 3) {
     await browser.close();
   }
 })();
+          
